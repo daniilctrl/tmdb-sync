@@ -1,101 +1,187 @@
 # tmdb-sync
 
-Сервис синхронизирует каталог фильмов TMDB → локальный Postgres. Синк
-инкрементальный: повторные запуски тянут только изменения через `/movie/changes`.
+Сервис синхронизирует каталог фильмов TMDB в локальный Postgres и отдаёт его
+через REST. Синхронизация инкрементальная: повторные запуски тянут только
+изменения через TMDB `/movie/changes`.
 
-Стек: Node 20, NestJS 11 (Fastify), Prisma + Postgres, BullMQ + Redis.
+Стек: Node.js 20, NestJS 11 на Fastify, Prisma, Postgres 16, BullMQ, Redis 7.
 
 ## Запуск
 
 ```bash
-cp .env.example .env             # вписать TMDB_API_KEY
-docker compose up -d             # Postgres + Redis
+cp .env.example .env
+# вписать TMDB_API_KEY
+docker compose up -d
 npm install
 npx prisma migrate deploy
 npm run start
 ```
 
-- API: <http://localhost:3000>
-- `GET /movies?year=&genreId=&sort=&order=&page=&pageSize=` — список с фильтрами/пагинацией
-- `GET /movies/:id` — детали (404 если soft-deleted)
-- `GET /sync/status` — состояние последней синхронизации
-- `GET /health`, `GET /metrics`
+API будет доступен на http://localhost:3000.
+
+## REST API
+
+| Метод | Путь            | Что делает                                  |
+|-------|-----------------|---------------------------------------------|
+| GET   | /movies         | Список с пагинацией и фильтрами             |
+| GET   | /movies/:id     | Детали фильма. 404, если soft-deleted       |
+| GET   | /sync/status    | Состояние последней синхронизации           |
+| GET   | /health         | Готовность Postgres и Redis                 |
+| GET   | /metrics        | Метрики в формате Prometheus                |
+
+Параметры запроса `/movies`:
+
+| Параметр  | Тип и допустимые значения                         | По умолчанию |
+|-----------|---------------------------------------------------|--------------|
+| page      | целое, >= 1                                       | 1            |
+| pageSize  | целое, 1..100                                     | 20           |
+| year      | целое, 1800..2100                                 | без фильтра  |
+| genreId   | целое, id жанра по справочнику TMDB               | без фильтра  |
+| sort      | popularity, vote_average, release_date, title     | popularity   |
+| order     | asc, desc                                         | desc         |
+
+Ответ списка содержит `data` и `pagination` с полями `page`, `pageSize`,
+`total`, `totalPages`.
+
+## Конфигурация
+
+Всё берётся из `.env`, шаблон в `.env.example`.
+
+| Переменная               | Назначение                                                     |
+|--------------------------|----------------------------------------------------------------|
+| TMDB_API_KEY             | Ключ TMDB v3                                                   |
+| TMDB_BASE_URL            | Базовый URL TMDB API                                           |
+| TMDB_RATE_LIMIT_PER_SEC  | Глобальный лимит воркера деталей. По умолчанию 40              |
+| SYNC_INTERVAL_MINUTES    | Период инкрементального синка. По умолчанию 15                 |
+| BOOTSTRAP_POPULAR_PAGES  | Сколько страниц `/movie/popular` тянуть при первом старте      |
+| SYNC_JOB_ATTEMPTS        | Сколько раз BullMQ ретраит упавший job деталей. По умолчанию 5 |
+| DATABASE_URL             | Строка подключения к Postgres                                  |
+| REDIS_HOST, REDIS_PORT   | Подключение к Redis                                            |
+| PORT, LOG_LEVEL, NODE_ENV| Общие настройки приложения                                     |
 
 ## Схема БД
 
 ```
-movies                            id = TMDB id (PK)
-  title, overview, release_date, popularity, vote_average, ...
-  last_change_observed_at         верх окна /changes, в котором всплыл id
-  synced_at                       @updatedAt
-  deleted_at                      soft delete
+movies
+  id                       PK, совпадает с TMDB id
+  title, original_title, overview
+  release_date, runtime, popularity, vote_average, vote_count
+  poster_path, backdrop_path, original_language, adult, status
+  last_change_observed_at  верхняя граница окна /changes, в котором всплыл id
+  synced_at                @updatedAt
+  deleted_at               soft delete
 
-genres        (id, name)
-movie_genres  (movie_id, genre_id) — N:N
+genres        id, name
+movie_genres  movie_id, genre_id   N:N
 
-sync_state    singleton id=1
-  last_change_cursor              курсор инкрементального синка
+sync_state                синглтон id = 1
+  last_change_cursor      курсор инкрементального синка
   bootstrap_completed_at
 
-sync_runs                         журнал каждого запуска
-  kind, status, cursor_from/to, started/finished_at, counters, error_message
+sync_runs                 журнал каждого запуска
+  kind, status
+  started_at, finished_at
+  cursor_from, cursor_to
+  ids_enqueued            сколько id ушло в очередь деталей
+  movies_upserted         сколько фактически записалось
+  movies_failed           сколько упало после всех ретраев
+  error_message           если status = 'error'
 ```
 
-Индексы: `release_date`, `popularity desc`, `vote_average desc`, `deleted_at`,
-`movie_genres(genre_id)`, `sync_runs(started_at desc, status)`.
+Индексы: `movies.release_date`, `movies.popularity desc`,
+`movies.vote_average desc`, `movies.deleted_at`,
+`movie_genres.genre_id`, `sync_runs.started_at desc`, `sync_runs.status`.
 
 ## Логика синхронизации
 
-```
-@Cron('*/15 * * * *') → BullMQ.add('sync', { jobId: 'incremental-sync' })  ← дедуп
-                                                              │
-SyncChangesProcessor          concurrency: 1                  ▼
-  while (window = sync.openWindow()) {            чанки ≤7 дней
-    run = sync.startRun(window)
-    ids = tmdb.fetchChangedIds(window)            GET /movie/changes
-    detailsQueue.addBulk(ids, jobId=`movie:${id}`) ← дедуп
-    sync.commitWindow(run.id, window)             tx: SyncRun + SyncState
-  }
-                                                              │
-MovieDetailsProcessor     concurrency: 10                     ▼
-                          limiter: 40 req/sec
-  tmdb.fetchMovie(id) → movies.upsertFromTmdb(details)
-  on 404      → softDelete(id)
-  on 429/5xx  → throw → BullMQ retry (5 attempts, exp backoff)
-```
+### Bootstrap
 
-## Почему так
+Запускается один раз при первом старте, пока `sync_state.bootstrap_completed_at`
+ещё `NULL`.
 
-- **`movies.id = TMDB id` (не autoincrement)** - upsert идемпотентен из коробки
-  (`ON CONFLICT (id) DO UPDATE`), без поиска по external_id, без гонок.
+1. Загружает справочник жанров из `/genre/movie/list`.
+2. Тянет первые `BOOTSTRAP_POPULAR_PAGES` страниц `/movie/popular`
+   и делает upsert каждого фильма.
+3. Отправляет id всех загруженных фильмов в очередь деталей. Тот же воркер,
+   что обрабатывает инкрементальный синк, добирает по ним полные данные:
+   runtime, статус, полный список жанров.
+4. Помечает `bootstrap_completed_at = now()` и
+   `last_change_cursor = now()`.
 
-- **Окна `/movie/changes` чанкуются по 7 дней** — TMDB ограничивает окно 14
-  днями. После каждого чанка курсор двигается атомарно с записью `sync_runs`
-  (одна транзакция). Падение на чанке #3 → следующий запуск стартует с #3,
-  идемпотентность upsert-ов делает повтор безопасным.
+Третий шаг нужен потому, что `/movie/popular` отдаёт обрезанную проекцию
+без runtime и без полного списка жанров.
 
-- **Rate limit на BullMQ-воркере, а не в TmdbClient** — лимитер в клиенте
-  при N инстансах приложения умножается на N. На воркере лимит работает
-  через Redis глобально для всех инстансов.
+### Инкрементальный синк
 
-- **Concurrent-защита через BullMQ**: `jobId='incremental-sync'` + `removeOnComplete`
-  не даёт двум pending-job-ам с таким id, `concurrency: 1` + Redis-lock не
-  даёт двум воркерам обработать один job одновременно. Advisory lock в
-  Postgres был бы дублирующей шкалой.
+Запускается по cron через `SchedulerRegistry` раз в `SYNC_INTERVAL_MINUTES`
+минут.
 
-- **Soft delete** на 404 от TMDB; при возврате фильма `upsertFromTmdb`
-  ставит `deletedAt = null`.
+1. Cron-callback кладёт в очередь `sync` job с фиксированным
+   `jobId='incremental-sync'`. Повторный job с тем же id не встанет
+   в очередь, пока предыдущий не завершён.
+2. `SyncChangesProcessor` с concurrency = 1 берёт job и в цикле обрабатывает
+   окна `[last_change_cursor, now]`. TMDB ограничивает окно 14 днями,
+   поэтому окно режется на чанки по 7 дней.
+3. Для каждого чанка:
+   - вызов `/movie/changes` отдаёт список изменённых id, с пагинацией;
+   - id уходят в очередь деталей по одному job на каждый id,
+     `jobId='movie:${id}'` дедуплицирует параллельные обновления;
+   - одной транзакцией: `sync_runs.status = success`,
+     `ids_enqueued = N`, `last_change_cursor = window.to`;
+   - переход к следующему чанку.
+4. `MovieDetailsProcessor` с concurrency = 10 и Redis-лимитером
+   40 req/sec тянет `/movie/{id}` и делает upsert. На 404 ставит soft-delete.
+   На 429 и 5xx бросает ошибку, BullMQ ретраит с экспоненциальным backoff,
+   до `SYNC_JOB_ATTEMPTS` попыток.
+5. Каждый завершённый job деталей через `OnWorkerEvent('completed' | 'failed')`
+   инкрементирует `sync_runs.movies_upserted` или `movies_failed`. Эти
+   счётчики могут продолжать расти после того, как run помечен `success`:
+   их сумма сходится к `ids_enqueued` по мере драина очереди.
 
-- **`last_change_observed_at` вместо `tmdb_updated_at`** — TMDB не отдаёт
-  `updated_at`. Храним верхнюю границу окна `/changes`, в котором всплыл id.
+### Поведение при сбоях
+
+- Падение посреди чанков. Курсор сдвинут только до последнего успешного
+  чанка, следующий запуск продолжит с того же места.
+- Падение на одном job деталей. Ретраится самим BullMQ, не влияет на курсор
+  и не блокирует обработку других id.
+- Падение всего процессора. `SyncRun` пишется со статусом `error`
+  и `error_message`, курсор не сдвигается, следующий cron-тик повторит окно.
+
+## Решения по проектированию
+
+`movies.id` равен TMDB id, а не автоинкременту. Upsert идемпотентен без
+поиска по external_id, повторный синк тех же данных безопасен.
+
+Окно `/changes` режется на чанки по 7 дней потому, что TMDB ограничивает
+запрос 14 днями. После каждого чанка курсор и `sync_run` обновляются в
+одной транзакции, поэтому падение на чанке N не теряет работу первых N-1.
+
+Rate limit стоит на BullMQ-воркере, а не в HTTP-клиенте. Лимитер в клиенте
+при нескольких инстансах приложения умножился бы на число инстансов.
+Лимитер в BullMQ работает через Redis глобально на все инстансы.
+
+Дедуп идёт через `jobId` BullMQ, без advisory lock в Postgres.
+`jobId='incremental-sync'` плюс `removeOnComplete` не дают встать в очередь
+второму job с тем же id. `concurrency: 1` плюс Redis-lock не дают двум
+воркерам забрать один job одновременно. Дополнительный advisory lock был бы
+дублирующей защитой.
+
+Soft-delete срабатывает на 404 от TMDB. При возврате фильма в каталог
+`upsertFromTmdb` ставит `deletedAt = null`, поэтому ресуррект тоже
+идемпотентен.
+
+`last_change_observed_at` хранится вместо `tmdb_updated_at` потому, что
+TMDB не отдаёт `updated_at` в `/movie/{id}`. Поле хранит верхнюю границу
+окна `/changes`, в котором id был замечен, и нужно для аудита.
 
 ## Тесты
 
 ```bash
-npm test
-INTEGRATION_DB=1 npm test
+npm test                       # unit
+INTEGRATION_DB=1 npm test      # плюс интеграционные против локального Postgres
 ```
 
-Покрыта ключевая логика синки: retry 429 / 404 без retry в TmdbClient,
-чанкирование окна и атомарность чекпоинта в SyncService, идемпотентность
-upsert и soft-delete-цикл (integration против реального Postgres).
+Покрыты ключевые места:
+- `TmdbClient`: retry на 429 и 5xx, отсутствие retry на 404.
+- `SyncService`: чанкирование окна, атомарность чекпоинта.
+- `MoviesService`: идемпотентность upsert и soft-delete-цикл, реальный Postgres.
