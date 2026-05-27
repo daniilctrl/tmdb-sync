@@ -1,6 +1,8 @@
 import { InjectQueue, Processor, WorkerHost } from '@nestjs/bullmq';
-import { Logger } from '@nestjs/common';
-import { Cron } from '@nestjs/schedule';
+import { Logger, OnModuleInit } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
+import { SchedulerRegistry } from '@nestjs/schedule';
+import { CronJob } from 'cron';
 import { Queue } from 'bullmq';
 import { SyncService } from '../sync.service';
 import { TmdbClient } from '../../tmdb/tmdb.client';
@@ -10,9 +12,12 @@ import {
   MovieDetailsJobData,
   SYNC_CHANGES_QUEUE,
 } from '../queues';
+import type { Env } from '../../config/env.schema';
+
+const CRON_NAME = 'incremental-sync';
 
 @Processor(SYNC_CHANGES_QUEUE, { concurrency: 1 })
-export class SyncChangesProcessor extends WorkerHost {
+export class SyncChangesProcessor extends WorkerHost implements OnModuleInit {
   private readonly logger = new Logger(SyncChangesProcessor.name);
 
   constructor(
@@ -21,12 +26,24 @@ export class SyncChangesProcessor extends WorkerHost {
     private readonly detailsQueue: Queue<MovieDetailsJobData>,
     private readonly sync: SyncService,
     private readonly tmdb: TmdbClient,
+    private readonly scheduler: SchedulerRegistry,
+    private readonly config: ConfigService<Env, true>,
   ) {
     super();
   }
 
-  @Cron('*/15 * * * *')
-  async tick(): Promise<void> {
+  onModuleInit(): void {
+    const minutes = this.config.get('SYNC_INTERVAL_MINUTES', { infer: true });
+    const job = CronJob.from({
+      cronTime: `0 */${minutes} * * * *`,
+      onTick: () => void this.tick(),
+    });
+    this.scheduler.addCronJob(CRON_NAME, job as never);
+    job.start();
+    this.logger.log(`Incremental sync scheduled every ${minutes} minute(s)`);
+  }
+
+  private async tick(): Promise<void> {
     await this.selfQueue.add(
       'tick',
       {},
