@@ -1,0 +1,81 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model Movie {
+  id               Int       @id
+  title            String
+  originalTitle    String?   @map("original_title")
+  overview         String?
+  releaseDate      DateTime? @map("release_date") @db.Date
+  popularity       Float     @default(0)
+  voteAverage      Float     @default(0) @map("vote_average")
+  voteCount        Int       @default(0) @map("vote_count")
+  runtime          Int?
+  posterPath       String?   @map("poster_path")
+  backdropPath     String?   @map("backdrop_path")
+  originalLanguage String?   @map("original_language")
+  adult            Boolean   @default(false)
+  status           String?
+
+  lastChangeObservedAt DateTime? @map("last_change_observed_at")
+  syncedAt             DateTime  @default(now()) @updatedAt @map("synced_at")
+  deletedAt            DateTime? @map("deleted_at")
+
+  genres MovieGenre[]
+
+  @@index([releaseDate])
+  @@index([popularity(sort: Desc)])
+  @@index([voteAverage(sort: Desc)])
+  @@index([deletedAt])
+  @@map("movies")
+}
+
+model Genre {
+  id     Int          @id
+  name   String       @unique
+  movies MovieGenre[]
+
+  @@map("genres")
+}
+
+model MovieGenre {
+  movieId Int   @map("movie_id")
+  genreId Int   @map("genre_id")
+  movie   Movie @relation(fields: [movieId], references: [id], onDelete: Cascade)
+  genre   Genre @relation(fields: [genreId], references: [id], onDelete: Cascade)
+
+  @@id([movieId, genreId])
+  @@index([genreId])
+  @@map("movie_genres")
+}
+
+model SyncState {
+  id                   Int       @id @default(1)
+  lastChangeCursor     DateTime  @map("last_change_cursor")
+  bootstrapCompletedAt DateTime? @map("bootstrap_completed_at")
+  updatedAt            DateTime  @default(now()) @updatedAt @map("updated_at")
+
+  @@map("sync_state")
+}
+
+model SyncRun {
+  id             Int       @id @default(autoincrement())
+  kind           String
+  status         String
+  startedAt      DateTime  @default(now()) @map("started_at")
+  finishedAt     DateTime? @map("finished_at")
+  cursorFrom     DateTime? @map("cursor_from")
+  cursorTo       DateTime? @map("cursor_to")
+  moviesUpserted Int       @default(0) @map("movies_upserted")
+  moviesFailed   Int       @default(0) @map("movies_failed")
+
+  @@index([startedAt(sort: Desc)])
+  @@index([status])
+  @@map("sync_runs")
+}
