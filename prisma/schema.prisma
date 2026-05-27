@@ -75,6 +75,7 @@ model SyncRun {
   idsEnqueued    Int       @default(0) @map("ids_enqueued")
   moviesUpserted Int       @default(0) @map("movies_upserted")
   moviesFailed   Int       @default(0) @map("movies_failed")
+  errorMessage   String?   @map("error_message")
 
   @@index([startedAt(sort: Desc)])
   @@index([status])
