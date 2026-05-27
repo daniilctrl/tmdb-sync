@@ -56,7 +56,7 @@ describe('SyncService', () => {
         from: new Date('2024-06-01T00:00:00Z'),
         to: new Date('2024-06-08T00:00:00Z'),
       },
-      { upserted: 10, failed: 0 },
+      10,
     );
 
     expect(prisma.$transaction).toHaveBeenCalledTimes(1);

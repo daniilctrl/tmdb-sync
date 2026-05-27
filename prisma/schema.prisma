@@ -72,6 +72,7 @@ model SyncRun {
   finishedAt     DateTime? @map("finished_at")
   cursorFrom     DateTime? @map("cursor_from")
   cursorTo       DateTime? @map("cursor_to")
+  idsEnqueued    Int       @default(0) @map("ids_enqueued")
   moviesUpserted Int       @default(0) @map("movies_upserted")
   moviesFailed   Int       @default(0) @map("movies_failed")
 

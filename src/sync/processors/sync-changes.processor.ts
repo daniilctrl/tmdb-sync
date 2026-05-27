@@ -78,7 +78,11 @@ export class SyncChangesProcessor extends WorkerHost implements OnModuleInit {
           await this.detailsQueue.addBulk(
             ids.map((id) => ({
               name: 'fetch-details',
-              data: { movieId: id, observedAt: window.to.toISOString() },
+              data: {
+                movieId: id,
+                observedAt: window.to.toISOString(),
+                runId: run.id,
+              },
               opts: {
                 jobId: `movie:${id}`,
                 removeOnComplete: 1000,
@@ -88,10 +92,7 @@ export class SyncChangesProcessor extends WorkerHost implements OnModuleInit {
           );
         }
 
-        await this.sync.commitWindow(run.id, window, {
-          upserted: ids.length,
-          failed: 0,
-        });
+        await this.sync.commitWindow(run.id, window, ids.length);
       } catch (error) {
         await this.sync.failRun(run.id, error as Error);
         throw error;

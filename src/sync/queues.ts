@@ -5,4 +5,6 @@ export const INCREMENTAL_JOB_ID = 'incremental-sync';
 export interface MovieDetailsJobData {
   movieId: number;
   observedAt: string;
+  /** SyncRun.id whose counters should be incremented on outcome */
+  runId?: number;
 }

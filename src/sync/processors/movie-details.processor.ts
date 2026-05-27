@@ -1,8 +1,9 @@
-import { Processor, WorkerHost } from '@nestjs/bullmq';
+import { OnWorkerEvent, Processor, WorkerHost } from '@nestjs/bullmq';
 import { HttpException, Logger } from '@nestjs/common';
 import { Job } from 'bullmq';
 import { MoviesService } from '../../movies/movies.service';
 import { TmdbClient } from '../../tmdb/tmdb.client';
+import { SyncService } from '../sync.service';
 import { MOVIE_DETAILS_QUEUE, MovieDetailsJobData } from '../queues';
 
 @Processor(MOVIE_DETAILS_QUEUE, {
@@ -15,6 +16,7 @@ export class MovieDetailsProcessor extends WorkerHost {
   constructor(
     private readonly tmdb: TmdbClient,
     private readonly movies: MoviesService,
+    private readonly sync: SyncService,
   ) {
     super();
   }
@@ -36,6 +38,26 @@ export class MovieDetailsProcessor extends WorkerHost {
         `Failed to upsert movie ${movieId}: ${(error as Error).message}`,
       );
       throw error;
+    }
+  }
+
+  @OnWorkerEvent('completed')
+  async onCompleted(job: Job<MovieDetailsJobData>): Promise<void> {
+    const { runId } = job.data;
+    if (runId !== undefined) {
+      await this.sync.incrementRunCounter(runId, 'moviesUpserted');
+    }
+  }
+
+  @OnWorkerEvent('failed')
+  async onFailed(job: Job<MovieDetailsJobData>): Promise<void> {
+    const isFinal = job.attemptsMade >= (job.opts.attempts ?? 1);
+    if (!isFinal) return;
+
+    const { runId, movieId } = job.data;
+    this.logger.error(`Movie ${movieId} permanently failed: ${job.failedReason}`);
+    if (runId !== undefined) {
+      await this.sync.incrementRunCounter(runId, 'moviesFailed');
     }
   }
 }

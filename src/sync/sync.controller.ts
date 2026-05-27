@@ -29,6 +29,7 @@ function serializeRun(run: SyncRun) {
     finished_at: run.finishedAt?.toISOString() ?? null,
     cursor_from: run.cursorFrom?.toISOString() ?? null,
     cursor_to: run.cursorTo?.toISOString() ?? null,
+    ids_enqueued: run.idsEnqueued,
     movies_upserted: run.moviesUpserted,
     movies_failed: run.moviesFailed,
     error_message: run.errorMessage,

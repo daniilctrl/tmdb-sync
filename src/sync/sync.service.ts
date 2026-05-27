@@ -53,10 +53,16 @@ export class SyncService {
     });
   }
 
+  /**
+   * Commits a window's cursor and records how many ids we enqueued.
+   * `moviesUpserted` / `moviesFailed` are filled in asynchronously by
+   * MovieDetailsProcessor as detail jobs settle — so they may keep
+   * growing after the run is marked `success`.
+   */
   async commitWindow(
     runId: number,
     window: ChangesWindow,
-    counters: { upserted: number; failed: number },
+    idsEnqueued: number,
   ): Promise<void> {
     await this.prisma.$transaction([
       this.prisma.syncRun.update({
@@ -64,8 +70,7 @@ export class SyncService {
         data: {
           status: 'success',
           finishedAt: new Date(),
-          moviesUpserted: counters.upserted,
-          moviesFailed: counters.failed,
+          idsEnqueued,
         },
       }),
       this.prisma.syncState.update({
@@ -96,9 +101,20 @@ export class SyncService {
       data: {
         status: 'success',
         finishedAt: new Date(),
+        idsEnqueued: counters.upserted + counters.failed,
         moviesUpserted: counters.upserted,
         moviesFailed: counters.failed,
       },
+    });
+  }
+
+  incrementRunCounter(
+    runId: number,
+    field: 'moviesUpserted' | 'moviesFailed',
+  ): Promise<unknown> {
+    return this.prisma.syncRun.update({
+      where: { id: runId },
+      data: { [field]: { increment: 1 } },
     });
   }
 
