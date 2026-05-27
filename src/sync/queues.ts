@@ -4,7 +4,8 @@ export const INCREMENTAL_JOB_ID = 'incremental-sync';
 
 export interface MovieDetailsJobData {
   movieId: number;
-  observedAt: string;
-  /** SyncRun.id whose counters should be incremented on outcome */
+  /** ISO date of the /changes window that observed this id; absent for bootstrap-triggered fetches */
+  observedAt?: string;
+  /** SyncRun.id whose counters should be incremented on outcome; absent for bootstrap */
   runId?: number;
 }

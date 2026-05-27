@@ -1,8 +1,11 @@
+import { InjectQueue } from '@nestjs/bullmq';
 import { Injectable, Logger, OnApplicationBootstrap } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import { Queue } from 'bullmq';
 import { SyncService } from './sync.service';
 import { TmdbClient } from '../tmdb/tmdb.client';
 import { MoviesService } from '../movies/movies.service';
+import { MOVIE_DETAILS_QUEUE, MovieDetailsJobData } from './queues';
 import type { Env } from '../config/env.schema';
 
 @Injectable()
@@ -13,6 +16,8 @@ export class SyncBootstrap implements OnApplicationBootstrap {
     private readonly sync: SyncService,
     private readonly tmdb: TmdbClient,
     private readonly movies: MoviesService,
+    @InjectQueue(MOVIE_DETAILS_QUEUE)
+    private readonly detailsQueue: Queue<MovieDetailsJobData>,
     private readonly config: ConfigService<Env, true>,
   ) {}
 
@@ -31,6 +36,7 @@ export class SyncBootstrap implements OnApplicationBootstrap {
     const run = await this.sync.startRun('bootstrap');
     let upserted = 0;
     let failed = 0;
+    const allIds: number[] = [];
 
     try {
       const { genres } = await this.tmdb.fetchGenres();
@@ -42,6 +48,7 @@ export class SyncBootstrap implements OnApplicationBootstrap {
         for (const movie of res.results) {
           try {
             await this.movies.upsertFromPopular(movie, knownGenreIds);
+            allIds.push(movie.id);
             upserted += 1;
           } catch (err) {
             failed += 1;
@@ -52,6 +59,25 @@ export class SyncBootstrap implements OnApplicationBootstrap {
         }
         this.logger.log(
           `Bootstrap: page ${page}/${pages} done (${upserted} upserted)`,
+        );
+      }
+
+      // Popular gives only a thin projection (no runtime / status / full genres).
+      // Queue a detail fetch for each id so the rate-limited worker fills in the rest.
+      if (allIds.length > 0) {
+        await this.detailsQueue.addBulk(
+          allIds.map((id) => ({
+            name: 'fetch-details',
+            data: { movieId: id },
+            opts: {
+              jobId: `movie:${id}`,
+              removeOnComplete: 1000,
+              removeOnFail: 500,
+            },
+          })),
+        );
+        this.logger.log(
+          `Bootstrap: ${allIds.length} detail jobs queued for enrichment`,
         );
       }
 

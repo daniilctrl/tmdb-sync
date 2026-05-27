@@ -27,7 +27,10 @@ export class MovieDetailsProcessor extends WorkerHost {
     const { movieId, observedAt } = job.data;
     try {
       const details = await this.tmdb.fetchMovie(movieId);
-      await this.movies.upsertFromTmdb(details, new Date(observedAt));
+      await this.movies.upsertFromTmdb(
+        details,
+        observedAt ? new Date(observedAt) : null,
+      );
       return { result: 'upserted' };
     } catch (error) {
       if (error instanceof HttpException && error.getStatus() === 404) {

@@ -33,7 +33,7 @@ export class MoviesService {
 
   async upsertFromTmdb(
     details: TmdbMovieDetails,
-    observedAt: Date,
+    observedAt: Date | null,
   ): Promise<Movie> {
     const movieData = mapTmdbDetailsToMovie(details, observedAt);
     const genres = details.genres ?? [];
@@ -171,7 +171,7 @@ function parseReleaseDate(value: string | undefined | null): Date | null {
 
 function mapTmdbDetailsToMovie(
   details: TmdbMovieDetails,
-  observedAt: Date,
+  observedAt: Date | null,
 ): Prisma.MovieUncheckedCreateInput {
   return {
     id: details.id,
